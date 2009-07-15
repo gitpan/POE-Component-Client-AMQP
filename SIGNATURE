@@ -1,0 +1,37 @@
+This file contains message digests of all files listed in MANIFEST,
+signed via the Module::Signature module, version 0.55.
+
+To verify the content in this distribution, first make sure you have
+Module::Signature installed, then type:
+
+    % cpansign -v
+
+It will check each file's integrity, as well as the signature's
+validity.  If "==> Signature verified OK! <==" is not displayed,
+the distribution may already have been compromised, and you should
+not run its Makefile.PL or Build.PL.
+
+-----BEGIN PGP SIGNED MESSAGE-----
+Hash: SHA1
+
+SHA1 9ef0611becfc092292c8af0a95cfab0c26feee75 Build.PL
+SHA1 f235ba4160673bcb7c9d58c2f09dbc7fc0efadea LICENSE
+SHA1 02066fe4b2758302094873f28f514d68f779bd52 MANIFEST
+SHA1 eaa7f8f5e3da449439279cff9ec9f9cfce8f2625 META.yml
+SHA1 dc621186e0a9374d4aeddab4f1b7f83bbe07ffe5 Makefile.PL
+SHA1 a22c8d1a51489aaf0559580c7e4c2e43cb533b24 README
+SHA1 742242796eaae1219e92b836282f11a346f1b686 examples/README
+SHA1 ab87271d8c81a4ee0e58cf90098046b957220ed8 examples/ack.pl
+SHA1 4c5538ff49ad78962aed8f94495d14b90451fe1d examples/examples.pm
+SHA1 59a39744d81b87c319a7728b550b5b4b161ca0ff examples/pingpong.pl
+SHA1 d14593ac1743c8a3f122b00ff849001dccda71c8 lib/POE/Component/Client/AMQP.pm
+SHA1 ba1a2a8d5ab76001667100593828c1af6ed72d92 lib/POE/Component/Client/AMQP/Channel.pm
+SHA1 f48d975f9e93325e20cc6c84f0cec7692bf37783 lib/POE/Component/Client/AMQP/Queue.pm
+SHA1 9f01bf50f319f76eb4574ce1e28e8e96fa1f9dbb t/01_basic.t
+-----BEGIN PGP SIGNATURE-----
+Version: GnuPG v1.4.9 (GNU/Linux)
+
+iEYEARECAAYFAkpeQoUACgkQHHIpFH/pKkIgvgCfYdVpROFTThhzrqzhS2Ags1ri
+XEYAnj6BPz+M6pNCgbiDQc/uFymEWxO1
+=CZDm
+-----END PGP SIGNATURE-----
