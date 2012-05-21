@@ -15,10 +15,11 @@ use warnings;
 use POE;
 use Params::Validate;
 use Carp;
+use POE::Component::Client::AMQP qw(:constants);
 use base qw(Class::Accessor);
 __PACKAGE__->mk_accessors(qw(id server Alias));
 
-our $VERSION = 0.01;
+our $VERSION = 0.02;
 
 =head1 CLASS METHODS 
 
@@ -46,6 +47,10 @@ The L<POE::Session> alias so you can post to it's POE states.
 
 At the moment, only 'Created' is used.
 
+=item I<CascadeFailure> (default: 1)
+
+If this channel is closed, close also the server connection.
+
 =back
 
 Returns an object in this class.
@@ -53,6 +58,8 @@ Returns an object in this class.
 =back
 
 =cut
+
+my $_ids = 0;
 
 sub create {
     my $class = shift;
@@ -64,6 +71,8 @@ sub create {
         # User definable
         Alias     => 0,
         Callbacks => { default => {} },
+        CascadeFailure => { default => 1 },
+        CloseCallback => { default => sub {} },
         
         # Private
         consumers => { default => {} },
@@ -89,7 +98,7 @@ sub create {
 
     # Ensure we have a unique alias name
 
-    $args{Alias} ||= $args{server}{Alias} . '-channel-' . $args{id};
+    $args{Alias} ||= $args{server}{Alias} . '-channel-' . $_ids++;
 
     # Create the object and session
 
@@ -162,6 +171,24 @@ sub do_when_created {
     }
 }
 
+=head2 send_frames (...)
+
+=over 4
+
+Same as the POE state L<server_send>, but can be called on the object and before the channel is created.
+
+=back
+
+=cut
+
+sub send_frames {
+    my ($self, @frames) = @_;
+
+    $self->do_when_created(sub {
+        $poe_kernel->post($self->{Alias}, server_send => @frames);
+    });
+}
+
 ### Deferred methods ###
 
 =head2 queue ($name, \%opts)
@@ -215,7 +242,7 @@ sub queue {
                 synchronous_callback => sub {
                     if (! defined $name) {
                         # I didn't know the name of the queue at the time of Queue.Declare
-                        my $response_frame = shift;
+                        my $response_frame = $_[0]->method_frame;
                         $self->{queues}{ $response_frame->queue } = $queue;
                         $queue->name( $response_frame->queue );
                     }
@@ -227,6 +254,51 @@ sub queue {
     });
 
     return $queue;
+}
+
+=head2 qos (\%opts, $on_complete)
+
+=over 4
+
+Requests a specific quality of service from the server.  The %opts are 'prefetch_size' and 'prefetch_count'.
+
+$on_complete is an option callback that will be passed a boolean value indicating whether the QoS was set.
+
+This is a deferred call, similar to L<POE::Component::Client::AMQP::channel()>, so it can be used immediately.
+
+=back
+
+=cut
+
+sub qos {
+    my ($self, $opts, $on_complete) = @_;
+    
+    $on_complete ||= sub {};
+
+    $self->do_when_created(sub {
+        $poe_kernel->post($self->{Alias}, server_send => 
+            Net::AMQP::Frame::Method->new(
+                synchronous_callback => sub {
+                    my $response_frame = $_[0]->method_frame;
+                    my $success         = $response_frame->isa('Net::AMQP::Protocol::Basic::QosOk');
+                    $on_complete->($success);
+                },
+                method_frame => Net::AMQP::Protocol::Basic::Qos->new(%$opts),
+            ),
+        );
+    });
+
+    return 1;
+}
+
+sub close {
+    my $self = shift;
+
+    $self->do_when_created(sub {
+        $poe_kernel->post($self->{Alias}, server_send => 
+            Net::AMQP::Protocol::Channel::Close->new()
+        );
+    });
 }
 
 =head1 POE STATES
@@ -270,11 +342,16 @@ sub channel_created {
 sub server_input {
     my ($self, $kernel, $frame) = @_[OBJECT, KERNEL, ARG0];
 
+    if ($self->{should_be_dead}) {
+        $self->server->{Logger}->error("!! I should be dead !!");
+    }
+
     if ($frame->isa('Net::AMQP::Frame::Method')) {
         my $method_frame = $frame->method_frame;
 
         # TODO: There are probably other methods that have content following them
-        if ($method_frame->isa('Net::AMQP::Protocol::Basic::Deliver')) {
+        if ($method_frame->isa('Net::AMQP::Protocol::Basic::Deliver')
+            || $method_frame->isa('Net::AMQP::Protocol::Basic::Return')) {
             # Start collecting content
             $self->{collecting_content} = { method_frame => $method_frame };
             return;
@@ -283,6 +360,69 @@ sub server_input {
             $self->server->{Logger}->error("Channel ".$self->id." got method call $method_frame when content (header or body) was expected");
             return;
         }
+        elsif ($method_frame->isa('Net::AMQP::Protocol::Channel::Close')) {
+            # Come up with a descriptive reason why the channel closed
+
+            my $close_reason;
+            # If the Channel.Close event gives class and method id indicating what event cause the closure, find a
+            # friendly name from this and use it in the close reason
+            if ($method_frame->class_id && $method_frame->method_id) {
+                my $method_class = Net::AMQP::Frame::Method->registered_method_class($method_frame->class_id, $method_frame->method_id);
+                my ($class_name, $method_name) = $method_class =~ m{^Net::AMQP::Protocol::(.+)::(.+)$};
+                $close_reason = "The method $class_name.$method_name caused channel " . $self->id . ' to be';
+            }
+            else {
+                $close_reason = "The channel has been";
+            }
+            $close_reason .= ' closed by the server: ' . $method_frame->reply_code . ': ' . $method_frame->reply_text;
+
+            $self->server->{Logger}->error($close_reason);
+
+            if ($self->{CloseCallback}) {
+                $self->{CloseCallback}->($close_reason);
+            }
+
+            if ($self->{CascadeFailure}) {
+                $self->server->stop()
+            }
+            else {
+                $kernel->call($self->{Alias}, 'server_send',
+                    Net::AMQP::Protocol::Channel::CloseOk->new()
+                );
+            }
+
+            # Delete references to myself in the server
+            delete $self->server->{channels}{ $self->id };
+            delete $self->server->{wait_synchronous}{ $self->id };
+
+            # Delete the reference to the server to reduce circular references
+            #$self->{server} = undef;;
+            $self->{should_be_dead} = 1;
+
+            $kernel->alias_remove( $self->{Alias} );
+
+            return;
+        }
+        elsif ($method_frame->isa('Net::AMQP::Protocol::Channel::CloseOk')) {
+            if ($self->{CloseOkCallback}) {
+                $self->{CloseOkCallback}->();
+            }
+
+            # Delete references to myself in the server
+            delete $self->server->{channels}{ $self->id };
+            delete $self->server->{wait_synchronous}{ $self->id };
+
+            $self->server->{Logger}->info("Closing channel ".$self->id."; now have channels " . join(', ', sort { $a <=> $b } keys %{ $self->server->{channels} }) . " open");
+
+            # Delete the reference to the server to reduce circular references
+            #$self->{server} = undef;;
+            $self->{should_be_dead} = 1;
+
+            $kernel->alias_remove( $self->{Alias} );
+
+            return;
+        }
+
     }
     elsif ($frame->isa('Net::AMQP::Frame::Header')) {
         my $header_frame = $frame->header_frame;
@@ -310,6 +450,12 @@ sub server_input {
             # Done collecting content
             delete $self->{collecting_content};
 
+            if ($content_meta->{method_frame}->isa('Net::AMQP::Protocol::Basic::Return')) {
+                # FIXME
+                $self->server->{Logger}->error("Channel ".$self->id." received a returned payload (".$content_meta->{method_frame}->reply_code . ': ' . $content_meta->{method_frame}->reply_text ."); no way yet to handle this");
+                return;
+            }
+
             my $consumer_tag = $content_meta->{method_frame}->consumer_tag;
             my $consumer_data = $self->{consumers}{$consumer_tag};
             if (! $consumer_data) {
@@ -325,12 +471,20 @@ sub server_input {
 
             # The return value is normally ignored unless the Consume call had 'no_ack => 0',
             # in which case a 'true' response from the callback will automatically ack
-            if ($callback_return && ! $consumer_data->{opts}{no_ack}) {
-                $kernel->call($self->{Alias}, server_send =>
-                    Net::AMQP::Protocol::Basic::Ack->new(
+            if (defined $callback_return && ! $consumer_data->{opts}{no_ack}) {
+                my @message;
+                if ($callback_return eq AMQP_ACK) {
+                    push @message, Net::AMQP::Protocol::Basic::Ack->new(
                         delivery_tag => $content_meta->{method_frame}->delivery_tag
-                    )
-                );
+                    );
+                }
+                elsif ($callback_return eq AMQP_REJECT) {
+                    push @message, Net::AMQP::Protocol::Basic::Reject->new(
+                        delivery_tag => $content_meta->{method_frame}->delivery_tag,
+                        requeue => 1,
+                    );
+                }
+                $kernel->call($self->{Alias}, server_send => @message) if @message;
             }
         }
     }
